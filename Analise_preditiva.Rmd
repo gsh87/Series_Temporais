@@ -1,0 +1,577 @@
+---
+title: "Estudo de Series Temporais: Preditiva"
+author: "gsh87"
+date: "2018"
+output: 
+  flexdashboard::flex_dashboard:
+    vertical_layout: scroll
+    smooth_scroll: TRUE
+---
+
+<style type="text/css">
+
+.chart-title {  /* chart_title  */
+   font-size: 20px;
+</style>
+
+<!-- ################################################# -->
+
+```{r,echo=FALSE,include=FALSE}
+################################### 0 - Limpeza
+# removendo lixo da memoria
+rm(list=ls())
+set.seed(123)
+```
+
+```{r,echo=FALSE,results='hide',warning=FALSE,message=FALSE}
+## 1 - Pacotes
+options(repos=c(CRAN="http://vps.fmvz.usp.br/CRAN/"))
+library(pacman)    # pacote para load das bibliotecas
+p_load(stats)     #  Modelos ARIMA
+p_load(agricolae)# testes
+p_load(lmtest)    # testes de residuos
+p_load(randtests) # pacotes de testes estatisticos
+p_load(rms)       # pacote para stepwise
+p_load(forecast)  # forecast
+p_load(smooth)    # SMA - simple moving average
+p_load(nnfor)     # neural networks for time series
+p_load(urca)      # raizes unitarias
+p_load(nnfor)     # neural networks for time series
+## pacotes graficos ##
+p_load(ggplot2)   # grafico
+p_load(ggthemes)  # grafico 
+p_load(gridExtra) # Graficos em matrizes
+p_load(plotly)    # interative graphics
+
+## pacotes de manipulacao ##
+p_load(lubridate) # tratamento de datas
+p_load(plyr)     # empilhamento
+p_load(magrittr)   # pipeline
+p_load(dplyr)      # manipulacao de base
+p_load(knitr)       # apresentacao
+p_load(binomTools)   # extrai
+p_load(vcd)          
+p_load(DescTools)      # summary grafico
+p_load(RODBC)          # conexao ODC
+p_load(sqldf)          # sqldf
+p_load(corrplot)       # correlacao
+p_load(prais)
+p_load(Metrics)
+p_load(dummies)
+p_load(reshape2)       # empilha as colunas usando uma flag
+
+## Packages visual
+p_load(flexdashboard)
+p_load(DT)
+```
+
+
+
+```{r,echo=FALSE,warning=FALSE,fig.align='center',warning=FALSE,message=FALSE}
+### carregando  datasets
+p_load(datsets)
+Serie <- AirPassengers
+
+### Time series
+
+DATA <- as.Date(Serie)  # tira a data
+LIQUIDO <- as.numeric(Serie) # tira a observação
+
+Base <- data.frame(DATA,LIQUIDO)
+
+minimo <- min(ymd(Base$DATA))
+
+Serie_Volume  <- ts(Base$LIQUIDO,start=c(year(minimo),month(minimo)),freq=12) # define a serie
+
+
+### marcadores de ano e mes
+Marcador_Mes  <- ordered(cycle(Serie_Volume))
+Marcador_Ano  <- year(ymd(Base$DATA))
+
+# Base final
+Base %<>% cbind(Marcador_Mes,Marcador_Ano) %>% as.data.frame() 
+
+rm(list=setdiff(ls(),c("Serie_Volume","Base")))
+```
+
+<!-- ################################################# -->
+
+
+
+# Modelos de Previsão {data-orientation=rows}
+
+Para a construção dos modelos de previsão, estudamos três famílias de modelos: ETS - Suazivação Exponencial, SMA - Médias Moveis e ARIMA (no fundo os modelos possuem uma relação de contido entre eles).
+
+Row {.tabset .tabset-fade}
+-------------------------------------
+
+### ETS
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE,include=FALSE}
+#### split of bases
+tamanho <- length(Serie_Volume)
+tamanho_aprendizado <- tamanho-6
+tamanho_teste <- tamanho-tamanho_aprendizado
+
+# extraction date of the time serie
+mts <- as.numeric(time(Serie_Volume))
+## 'POSIXct, POSIXt' object
+Serie_Data <- date_decimal(mts) %>% as.Date()
+
+# learning  
+serie_aprendizado <- Serie_Volume[1:tamanho_aprendizado] %>% ts(start=c(year(Serie_Data[1]),month(Serie_Data[1])),freq=12)
+
+# validation
+serie_teste <- Serie_Volume[(tamanho_aprendizado+1):tamanho] %>% ts(start=c(year(Serie_Data[tamanho_aprendizado+1]),month(Serie_Data[tamanho_aprendizado+1])),freq=12)
+
+
+```
+
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+# modelo ETS
+Modelo_Ets <- ets(serie_aprendizado)
+predito_ETS <- forecast(Modelo_Ets,h=6,level=95)
+serie_predita_ETS <- predito_ETS$mean
+serie_upper_ETS <- predito_ETS$upper 
+serie_lower_ETS <- predito_ETS$lower 
+
+# real
+datas_estimadas <- serie_teste %>% time() %>% as.numeric() %>% date_decimal() %>% as.Date()
+valor_real <- as.matrix(serie_teste)
+
+# predict
+valor_predito <- as.matrix(serie_predita_ETS)
+
+# confidence interval
+valor_ic_inf <- as.matrix(serie_lower_ETS)[,1] %>% as.numeric()
+valor_ic_sup <- as.matrix(serie_upper_ETS)[,1] %>% as.numeric()
+
+#Base for graphic
+base_grafico1 <- data.frame(datas_estimadas,valor_real,valor_predito,valor_ic_inf=valor_ic_inf,valor_ic_sup=valor_ic_sup) %>% mutate(Erro_relativo = (valor_real-valor_predito)/valor_real)
+
+
+Grafico4 <- ggplot(data=base_grafico1,aes(x=datas_estimadas)) +                               geom_line(aes(y=valor_real,colour="valor_real")) +
+            geom_line(aes(y=valor_predito,colour="valor_predito")) +
+            geom_line(aes(y=valor_ic_inf,colour="limite inferior"),linetype=2)+
+            geom_line(aes(y=valor_ic_sup,colour="limite superior"),linetype=2)+
+            scale_color_manual("",
+                               breaks=c("valor_real","valor_predito","limite inferior","limite superior"),
+                               values=c("red","black","yellow","royalblue"))+
+            labs(title="Realizado vs Predito",x="tempo",y="R$")
+ggplotly(Grafico4)
+
+```
+
+
+### Resultados da Predição
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE,include=FALSE}
+# ERRO da PREDICAO MAPE: Mean Absolute porcentil Errors
+
+ERRO_Medio <- mape(serie_teste,serie_predita_ETS)*100
+ERRO1 <- paste(round(ape(serie_teste,serie_predita_ETS)*100,2),"%",sep="")
+Resultados_ETS <-data.frame(data=datas_estimadas,serie_teste,serie_predita_ETS,valor_ic_inf,valor_ic_sup,erro_porc=ERRO1) 
+
+```
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+kable(Resultados_ETS,align = "c")
+```
+
+
+### Conclusões: ETS
+
+Usando um modelo ETS para predizer a receita mensal obtemos um erro médio de `r paste(round(ERRO_Medio,2),"%",sep="")`.
+
+<!-- ################################################# -->
+Row {.tabset .tabset-fade}
+-------------------------------------
+
+### Modelos SMA
+
+Rodamos modelos SMA com ordens de 1 até 12 passos, os resultados são:
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+rm(list=setdiff(ls(),c("serie_aprendizado","serie_teste","Resultados_ETS","Serie_Volume","Base")))
+require(smooth)
+
+
+vector_AIC <- NULL
+vector_BIC <- NULL
+vector_iteracao <- NULL
+for(i in 1:12)
+{
+    Modelo_SMA <- sma(serie_aprendizado,order=i)
+    vector_AIC[i] <-Modelo_SMA[["ICs"]][1]
+    vector_BIC[i] <-Modelo_SMA[["ICs"]][3]
+    vector_iteracao[i] <-i
+    Matriz_AJUSTES <-data.frame("Passo"=vector_iteracao,"AIC"=vector_AIC,"BIC"=vector_BIC) 
+}
+
+ Modelo_SMA <- sma(serie_aprendizado,order=NULL)
+kable(Matriz_AJUSTES,align = "c")
+```
+
+
+Assim nota-se que o modelo SMA de ordem `r Modelo_SMA[["model"]]` é o mais adequado e portanto a classe SMAnão é valida.
+
+### SMA de ordem 5
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+ Modelo_SMA <- sma(serie_aprendizado,order=5)
+
+# quality of the ajust
+serie_predita <- Modelo_SMA$fitted
+
+# extraction date of the time serie
+serie_data_fit <- serie_aprendizado %>% time() %>% as.numeric() %>% date_decimal() %>%  as.Date()
+
+#value
+valor_real <- as.matrix(serie_aprendizado)
+valor_predito <- as.matrix(serie_predita)
+
+# R2
+R2 <- 1-var(valor_real-valor_predito)/var(valor_real)
+
+#MAPE
+mape_SMA <- mape(valor_real,valor_predito)*100
+
+#graphic
+base_grafico5 <- data.frame(data=serie_data_fit,valor_real,valor_predito)
+Grafico5 <- ggplot(base_grafico5,aes(x=data))+
+            geom_line(aes(y=valor_real,colour="valor_real"))+
+            geom_line(aes(y=valor_predito,colour="valor_predito"))+
+            scale_color_manual("",
+                               breaks=c("valor_real","valor_predito"),
+                               values=c("red","royalblue"))+
+            labs(title="Realizado vs Predito (ajuste)",x="tempo",y="R$")
+ggplotly(Grafico5)
+```
+
+
+
+### Predição com o SMA
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+
+
+predito_sma <- forecast(Modelo_SMA,h=6,level=95)
+serie_predita_sma <- predito_sma$mean
+
+# Results
+
+#date of the serie
+data_predito_sma <- serie_teste %>% time() %>% as.numeric() %>% date_decimal() %>% as.Date()
+
+# values
+valor_predito_sma <- as.matrix(serie_predita_sma)[,1] %>% as.numeric()
+valor_real_sma <- as.matrix(serie_teste)
+
+
+#graphic
+base_grafico6 <- data.frame(data=data_predito_sma,valor_predito_sma,valor_real_sma) %>% mutate(erro=paste(round(100*(valor_predito_sma-valor_real_sma)/valor_real_sma,2)),"%",sep="")
+
+
+Resultados_SMA <- base_grafico6
+
+grafico6 <- ggplot(base_grafico6,aes(x=data))+
+            geom_line(aes(y=valor_real_sma,colour="valor_real"))+
+            geom_line(aes(y=valor_predito_sma,colour="valor_predito"))+
+            scale_color_manual("",
+                               breaks=c("valor real","valor_predito"),
+                               values=c("red","royalblue"))+
+            labs(title="Realizado vs Predito",x="Data",y="R$")
+ggplotly(grafico6)
+
+## MAPE
+mape_SMA_predict <- mape(valor_real_sma,valor_predito_sma)*100
+```
+
+O modelo usando SMA obtém uma MAPE de `r paste(round(mape_SMA_predict,2),"%",sep="")`.
+
+### Resultados da Predição
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+ERRO_Medio_2 <- mape(valor_real_sma,valor_predito_sma)*100
+ERRO2 <- paste(round(ape(valor_real_sma,valor_predito_sma)*100,2),"%",sep="")
+Resultados_SMA <-data.frame(data = data_predito_sma,valor_real_sma,valor_predito_sma,erro_porc=ERRO2) 
+kable(Resultados_SMA,align='c')
+```
+
+
+<!-- ################################################# -->
+Row {.tabset .tabset-fade}
+-------------------------------------
+
+### Modelos ARIMA
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE,include=FALSE}
+rm(list=setdiff(ls(),c("serie_aprendizado","serie_teste","Resultados_ETS","Resultados_SMA","Serie_Volume","Base")))
+
+Modelo_arima <- auto.arima(serie_aprendizado)
+Sumario <- summary(Modelo_arima)
+#kable(Sumario,align = "c")
+```
+
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+
+
+# quality of the ajust
+serie_predita <- Modelo_arima$fitted
+
+#extract date of the time serie
+data_arima <- serie_aprendizado %>% time() %>% as.numeric() %>% date_decimal() %>% as.Date()
+
+# values
+valor_real_fit <- as.matrix(serie_aprendizado)
+valor_predito_fit <- as.matrix(serie_predita)
+
+base_grafico7 <- data.frame(data=data_arima,valor_real=valor_real_fit,valor_predito=valor_predito_fit)
+grafico7 <- ggplot(base_grafico7,aes(data))+
+            geom_line(aes(y=valor_real,colour="valor real"))+
+            geom_line(aes(y=valor_predito,colour="valor predito"))+
+            scale_color_manual("",
+                               breaks=c("valor real","valor predito"),
+                               values=c("red","royalblue"))+
+            labs(title="Real vs Previsto (Ajuste)",x="Data",y="R$")
+ggplotly(grafico7)
+
+# R2
+R2 <- 1-var(valor_real_fit-valor_predito_fit)/var(valor_real_fit)
+  
+# MAPE
+mape_arima_fit <- mape(valor_real_fit,valor_predito_fit)*100
+```
+
+### Predições com ARIMA
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+
+predito_arima <- forecast(Modelo_arima,h=6,level=95)
+
+serie_predito_arima <- predito_arima$mean
+serie_ic_lower <- predito_arima$lower[,1]
+serie_ic_upper <- predito_arima$upper[,1]
+
+
+# results
+# date
+data_arima_pred <- serie_teste %>% time() %>% as.numeric() %>% date_decimal() %>% as.Date()
+
+#values
+valor_real_pred <- as.matrix(serie_teste)
+valor_predito <- as.matrix(serie_predito_arima)
+valor_ic_inf <- as.matrix(serie_ic_lower)
+valor_ic_sup <- as.matrix(serie_ic_upper)
+
+#graphic
+base_grafico8 <- data.frame(data=data_arima_pred,valor_real=valor_real_pred,valor_predito=valor_predito,valor_ic_inf,valor_ic_sup) %>%  mutate(erro=paste(round(100*(valor_real_pred-valor_predito)/valor_real_pred,2),"%",sep=""))
+
+grafico8 <- ggplot(base_grafico8,aes(data))+
+            geom_line(aes(y=valor_real,colour="valor_real"))+
+            geom_line(aes(y=valor_predito,colour="valor_predito"))+
+            geom_line(aes(y=valor_ic_inf,colour="ic inf"),linetype=2)+
+            geom_line(aes(y=valor_ic_sup,colour="ic sup"),linetype=2)+
+            scale_color_manual("",
+                               breaks=c("valor_real","valor_predito","ic inf","ic sup"),
+                               values=c("black","royalblue","green","red"))+
+            labs(title="Real vs Previsto",x="Data",y="R$")
+ggplotly(grafico8)
+
+#mape
+mape_arima_pred <- mape(serie_teste,serie_predito_arima)*100
+
+Resultados_ARIMA <-base_grafico8 
+```
+
+
+### Resultados da Predição
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+kable(Resultados_ARIMA,align='c')
+
+```
+
+
+
+### Erros em função do passo
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE, include=FALSE}
+k=1
+Funcao_ARIMA <- function(tamanho_previsao=6,Serie_Volume)
+{
+  Base_Resultados2 <- NULL
+  for(k in 2:tamanho_previsao)
+  {
+    # split of  the base
+    #### split of bases
+    tamanho <- length(Serie_Volume)
+    tamanho_aprendizado <- tamanho-k
+    tamanho_teste <- k
+    
+    # extraction date of the time serie
+    mts <- as.numeric(time(Serie_Volume))
+    ## 'POSIXct, POSIXt' object
+    Serie_Data <- date_decimal(mts) %>% as.Date()
+    
+    # learning  
+    serie_aprendizado <- Serie_Volume[1:tamanho_aprendizado] %>% ts(start=c(year(Serie_Data[1]),month(Serie_Data[1])),freq=12)
+    
+    # validation
+    serie_teste <- Serie_Volume[(tamanho_aprendizado+1):tamanho] %>% ts(start=c(year(Serie_Data[tamanho_aprendizado+1]),month(Serie_Data[tamanho_aprendizado+1])),freq=12)    
+    
+    # modelo ARIMA
+    Modelo_ARIMA <- auto.arima(serie_aprendizado)
+    predito_ARIMA <- forecast(Modelo_ARIMA,h=tamanho_teste,level=95)
+    serie_predita_ARIMA <- predito_ARIMA$mean
+    
+    # real
+    datas_estimadas <- serie_teste %>% time() %>% as.numeric() %>% date_decimal() %>% as.Date()
+    valor_real <- as.matrix(serie_teste)
+    
+    # predict
+    valor_predito <- as.matrix(serie_predita_ARIMA)
+    
+    
+    # metrics of quality of predict
+    ERRO_Medio <- mape(serie_teste,serie_predita_ARIMA)*100
+    ERRO <- ape(serie_teste,serie_predita_ARIMA)*100
+    Maximo_Erro <- max(ERRO)
+    Minimo_Erro <- min(ERRO)
+    Vetor_Metricas <- data.frame(Qts_Previsoes=k,ERRO_Medio,Maximo_Erro,Minimo_Erro)
+    
+    if(k==2){
+      Base_Resultados2 <- Vetor_Metricas
+    } else
+    {
+      Base_Resultados2 <- rbind(Base_Resultados2,Vetor_Metricas)
+    }
+  }
+  return(Base_Resultados2)
+}
+
+Resultados_ARIMA2 <- Funcao_ARIMA(10,Serie_Volume)
+
+Grafico2 <- ggplot(Resultados_ARIMA2,aes(x=Qts_Previsoes))+
+  geom_line(aes(y=ERRO_Medio,colour="ERRO_Medio"))+
+  geom_line(aes(y=Maximo_Erro,colour="Maximo_Erro"))+
+  geom_line(aes(y=Minimo_Erro,colour="Minimo_Erro"))+
+  scale_color_manual("",breaks=c("ERRO_Medio","Maximo_Erro","Minimo_Erro"),                            values=c("red","royalblue","yellow"))+
+  labs(title="Erros" ,x="Número de Predições",y="%")
+ggplotly(Grafico2) 
+```
+
+
+### Conclusões sobre o ARIMA
+
+O ajuste de um modelo ARIMA com drift, obtemos sobre os dados ajustados um $R^{2}$ de  `r R2`. O MAPE é de `r paste(round(mape_arima_fit,2),"%",sep="")`.
+
+
+
+
+
+Row {.tabset .tabset-fade}
+-------------------------------------
+### MLP - AJUSTE
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+modelo_MLP <- mlp(Serie_Volume,hd=3,reps=3)
+plot(modelo_MLP)
+
+## ajust
+fit <- modelo_MLP$fitted
+```
+
+### MLP AJUSTE e REAL
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+ts.plot(fit,Serie_Volume,col=c("blue","red"),main="AJUSTE")
+legend("topright",legend=c("fit","real"),lty=1:1,col=c("blue","red"))
+
+```
+
+
+### MLP Predição
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+
+
+#######################3 mlp
+
+
+modelo_rede_original <- mlp(serie_aprendizado,hd=3,reps=3)
+predito_mlp_original <- forecast(modelo_rede_original,h=6,level=95)
+predito <- predito_mlp_original$mean
+valor_real <- as.matrix(serie_teste)
+
+
+
+#Dates
+Data_maxima_aprendida <- as.Date(serie_aprendizado) %>% max()
+sequencia <- seq(as.Date((Data_maxima_aprendida)), by = "month", length.out = 7)
+sequencia <- sequencia[2:7]
+
+## dataframe with results
+Erro <- paste(round(ape(valor_real,predito)*100,2),"%",sep="")
+Resultados_MLP <- data.frame(Data = sequencia,
+                         Predito = predito,
+                         Real=valor_real) %>% mutate(ERRO_MLP=Erro)
+
+Grafico3 <- ggplot(Resultados_MLP,aes(x=Data))+
+            geom_line(aes(y=Predito,color="Predito"))+
+            geom_line(aes(y=Real,color="Real"))+
+            scale_color_manual("",
+                               breaks=c("Predito","Real"),
+                               values=c("royalblue","green"))+
+            labs(title="Real vs Previsto",x="Data",y="R$")
+ggplotly(Grafico3)
+
+```
+
+### Tabela com as Predições
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+datatable(Resultados_MLP)
+```
+
+<!-- ################################################# -->
+Row {.tabset .tabset-fade}
+-------------------------------------
+
+### Resultados Finais
+
+Para os três tipos de modelos rodados temos:
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+rm(list=setdiff(ls(),c("serie_aprendizado","serie_teste","Resultados_ETS","Resultados_SMA","Resultados_ARIMA","Resultados_MLP")))
+
+# final base
+
+base_final <- data.frame(data=Resultados_SMA$data,
+                         Real=Resultados_ETS$serie_teste,
+                         ETS=Resultados_ETS$serie_predita,
+                         SMA=Resultados_SMA$valor_predito_sma,
+                         ARIMA=Resultados_ARIMA$valor_predito,
+                         MLP=Resultados_MLP$Predito,
+                         Erro_ETS=Resultados_ETS$erro_porc,
+                         Erro_SMA=Resultados_SMA$erro,
+                         Erro_ARIMA=Resultados_ARIMA$erro,
+                         Erro_MLP=Resultados_MLP$ERRO_MLP)
+# Mapes
+ETS <- paste(round(mape(base_final$Real,base_final$ETS)*100,3),"%",sep="")
+SMA <- paste(round(mape(base_final$Real,base_final$SMA)*100,3),"%",sep="")
+ARIMA <- paste(round(mape(base_final$Real,base_final$ARIMA)*100,3),"%",sep="")
+MLP <- paste(round(mape(base_final$Real,base_final$MLP)*100,3),"%",sep="")
+
+Mapes <- data.frame(ETS,SMA,ARIMA,MLP)
+
+
+# graphics
+Base_Aux <- base_final[c("data","Real","ETS","SMA","ARIMA","MLP")] 
+Base_Aux2 <- melt(Base_Aux,id="data") %>% mutate(tamanho=rep(4,30))
+
+grafico9 <- ggplot(Base_Aux2,aes(x=data,y=value))+
+            geom_point(aes(shape=variable,colour=variable,size=variable))+
+            theme(legend.title=element_blank())+
+            labs(title="Real vs Predito",x="Data",y="R$")
+ggplotly(grafico9)
+
+```
+

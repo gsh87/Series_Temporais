@@ -1,0 +1,440 @@
+---
+title: "Estudo de Series Temporais: Descritiva"
+author: "Gilberto Hida"
+date: "2018"
+output: 
+  flexdashboard::flex_dashboard:
+    vertical_layout: scroll
+    smooth_scroll: TRUE
+---
+
+<style type="text/css">
+
+.chart-title {  /* chart_title  */
+   font-size: 20px;
+</style>
+
+<!-- ################################################# -->
+
+```{r,echo=FALSE,include=FALSE}
+################################### 0 - Limpeza
+# removendo lixo da memoria
+rm(list=ls())
+set.seed(123)
+```
+
+```{r,echo=FALSE,results='hide',warning=FALSE,message=FALSE}
+## 1 - Pacotes
+options(repos=c(CRAN="http://vps.fmvz.usp.br/CRAN/"))
+library(pacman)    # pacote para load das bibliotecas
+p_load(stats)     #  Modelos ARIMA
+p_load(agricolae)# testes
+p_load(lmtest)    # testes de residuos
+p_load(randtests) # pacotes de testes estatisticos
+p_load(rms)       # pacote para stepwise
+p_load(forecast)  # forecast
+p_load(smooth)    # SMA - simple moving average
+p_load(nnfor)     # neural networks for time series
+p_load(urca)      # raizes unitarias
+
+## pacotes graficos ##
+p_load(ggplot2)   # grafico
+p_load(ggthemes)  # grafico 
+p_load(gridExtra) # Graficos em matrizes
+p_load(plotly)    # interative graphics
+
+## pacotes de manipulacao ##
+p_load(lubridate) # tratamento de datas
+p_load(plyr)     # empilhamento
+p_load(magrittr)   # pipeline
+p_load(dplyr)      # manipulacao de base
+p_load(knitr)       # apresentacao
+p_load(binomTools)   # extrai
+p_load(vcd)          
+p_load(DescTools)      # summary grafico
+p_load(RODBC)          # conexao ODC
+p_load(sqldf)          # sqldf
+p_load(corrplot)       # correlacao
+p_load(prais)
+p_load(Metrics)
+p_load(dummies)
+p_load(reshape2)       # empilha as colunas usando uma flag
+
+## Packages visual
+p_load(flexdashboard)
+p_load(DT)
+```
+
+
+
+```{r,echo=FALSE,warning=FALSE,fig.align='center',warning=FALSE,message=FALSE}
+### carregando  datasets
+p_load(datsets)
+Serie <- AirPassengers
+
+### Time series
+
+DATA <- as.Date(Serie)  # tira a data
+LIQUIDO <- as.numeric(Serie) # tira a observação
+
+Base <- data.frame(DATA,LIQUIDO)
+
+minimo <- min(ymd(Base$DATA))
+
+Serie_Volume  <- ts(Base$LIQUIDO,start=c(year(minimo),month(minimo)),freq=12) # define a serie
+
+
+### marcadores de ano e mes
+Marcador_Mes  <- ordered(cycle(Serie_Volume))
+Marcador_Ano  <- year(ymd(Base$DATA))
+
+# Base final
+Base %<>% cbind(Marcador_Mes,Marcador_Ano) %>% as.data.frame() 
+
+rm(list=setdiff(ls(),c("Serie_Volume","Base")))
+```
+
+# Tendência {data-orientation=rows}
+
+Row {.tabset .tabset-fade}
+-------------------------------------
+### Tendência
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+
+# Visualização
+Grafico1 <- ggplot(Base,aes(x=ymd(DATA),y=LIQUIDO))+geom_line(colour="royalblue")
+Grafico1 <- Grafico1+labs(title="Evolução do Volume",x="Data",y="R$")
+Grafico1 <- Grafico1+geom_smooth(method=lm,colour="red")
+ggplotly(Grafico1)
+```
+
+
+### Evolução Anual {data-commentary-width=400}
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+
+# adf <- adf.test(Serie_Volume)
+# pp<- pp.test(Serie_Volume)
+# kpss <- kpss.test(Serie_Volume,null="Level")
+
+# corta a base de dados
+Base_Tend <-Base
+
+## min e max
+Min_year <- min(Base_Tend$Marcador_Ano)
+Max_year <- max(Base_Tend$Marcador_Ano)
+
+Vetor_Beta <- NULL
+Vetor_P_Valor <- NULL
+for(k in Min_year:Max_year)
+  {
+  Base_Reg <- subset(Base_Tend,Marcador_Ano==k)
+  Base_Reg <- cbind(seq=seq(1:nrow(Base_Reg)),Base_Reg) %>% as.data.frame()
+  Regressao_Prais <- prais.winsten(LIQUIDO~seq,data=Base_Reg)
+  
+  Regressao_Prais %<>% as.list()
+  
+  Vetor_Beta[k-Min_year+1]<- Regressao_Prais[[1]][4]$coefficients[2,1]
+  Vetor_P_Valor[k-Min_year+1] <- Regressao_Prais[[1]][4]$coefficients[2,4]
+  }
+
+Teste <- t.test(Vetor_Beta[-1])
+#
+ Media_Beta <- Teste$estimate
+# IC_Beta <- Teste$conf.int[1:2]   # baixo valor de anos para fazer sentido o IC
+
+# regressão de pais winstern em toda a base
+ 
+ Base_Tend2 <- Base_Tend
+ Base_Tend2 <- cbind(seq=seq(1:nrow(Base_Tend)),Base_Tend) %>% as.data.frame()
+ Regressao_Prais <- prais.winsten(LIQUIDO~seq,data=Base_Tend2)
+ Summario <- Regressao_Prais[[1]]
+ 
+p_valor <- Summario$coefficients[2,4]
+   
+Grafico1A <- ggplot(Base,aes(x=ymd(DATA),y=LIQUIDO))+geom_line(colour="royalblue")
+Grafico1A <- Grafico1A+labs(title="Evolução do volume",x="Data",y="R$")
+Grafico1A <- Grafico1A+geom_smooth(data=Base,aes(x=ymd(DATA),y=LIQUIDO,color=factor(Marcador_Ano)),method=lm,se=FALSE) + guides("none")+theme(legend.position="none")
+
+ggplotly(Grafico1A)
+         
+```
+
+
+
+###  ACF e PACF
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+# uma ferramenta que auxilia na visualizacao da tendencia é a FAC. Um processo não estacionario apresenta lento decaimento de sua função de autocorrelacao                  
+
+ggtsdisplay(Serie_Volume)
+
+```
+
+###  ACF
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+
+ggAcf(Serie_Volume)
+```
+
+
+
+### Testes para tendência estocastica ADF
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+#Teste  ADF Ho: Existe raiz unitaria
+Teste_ADF <- ur.df(Serie_Volume,type = "trend",lags = 12,selectlags = "BIC")
+Teste_ADF
+```
+
+### Testes para tendência estocastica KPSS
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+# Teste KPSS Ho: Serie Estacionaria
+Teste_KPSS <- ur.kpss(Serie_Volume,type="tau",lags="long")
+Teste_KPSS
+
+```
+
+### Testes para tendência estocastica PP
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+# Phillips Peron Ho: Existe raiz unitaria
+Teste_pp <- ur.pp(Serie_Volume,type="Z-tau",model="trend",lags="long")
+Teste_pp
+```
+
+# Sazonalidade {data-orientation=rows}
+
+Row {.tabset .tabset-fade}
+-------------------------------------
+
+### Box Plot 
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+
+# visualizacao do boxplot
+grafico2<-ggplot(Base, aes(x = as.factor(Marcador_Mes), y = LIQUIDO, fill=as.factor(Marcador_Mes)))
+grafico2 <- grafico2+ geom_boxplot()
+grafico2 <- grafico2+labs(title="Variabilidade ao longo dos meses",x="Mes",y="Volume")
+grafico2 <- grafico2+ guides(fill = "none")
+ggplotly(grafico2)
+```
+
+
+### Plot por ano
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+
+# visualizacao do boxplot
+ggseasonplot(Serie_Volume)
+```
+
+
+### plot por mês
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+
+# visualizacao do boxplot
+ggmonthplot(Serie_Volume)
+```
+
+
+
+
+Row {.tabset .tabset-fade}
+-------------------------------------
+### Sem Tendência
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+rm(list=setdiff(ls(),c("Base","Serie_Volume")))
+
+
+# retirar a tendencia
+Serie_Volume_Diff <- diff(Serie_Volume,1)
+
+# verificando a diferenciação
+# plot.ts(Serie_Volume_Diff,col="royalblue",main=" volume sem a tendência")
+
+#ggtsdisplay(Serie_Volume_Diff)
+
+# nova base diferenciada
+
+Data_Diff <-  as.Date(Serie_Volume_Diff)
+Marcador_Mes  <- as.factor(ordered(cycle(Serie_Volume_Diff)))
+Marcador_Ano <- as.factor(year(Data_Diff))
+Liquido_Diff <- as.numeric(Serie_Volume_Diff)
+
+
+
+Base_Diff  <- data.frame(x = seq(1:length(Liquido_Diff)),Liquido_Diff=Liquido_Diff,Data_Diff,Marcador_Mes,Marcador_Ano)
+
+Min_year <- min(as.numeric(as.character(Base_Diff$Marcador_Ano)))
+Max_year <- Base_Diff$Marcador_Ano %>% as.character() %>% as.numeric() %>% max()
+
+# visualizacao do boxplot
+grafico2<-ggplot(Base_Diff, aes(x = as.factor(Marcador_Mes), y = Liquido_Diff, fill=as.factor(Marcador_Mes)))
+grafico2 <- grafico2+ geom_boxplot()
+grafico2 <- grafico2+labs(title="Variabilidade - Serie diferenciada",x="Mes",y="Volume")
+grafico2 <- grafico2+ guides(fill = "none")
+ggplotly(grafico2)
+
+```
+
+
+### Modelos Regressivos
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+# modelo de sazonalidade
+## modelo ciclic0
+formula <- "Liquido_Diff~x+sin(2*pi*x/12)+cos(2*pi*x/12)+sin(4*pi*x/12)+cos(4*pi*x/12)"
+Modelo_1 <- glm(data=Base_Diff,formula, family=gaussian)
+
+minimo <- min(ymd(as.Date(Base_Diff$Data_Diff)))
+ fit <- ts(fitted(Modelo_1),start=c(year(minimo),month(minimo)),freq=12)
+
+ts.plot(cbind(Serie_Volume_Diff,fit),col=c(1,2), main="ajuste com GLM")
+
+```
+
+ 
+
+### Detalhes da Regressão com componentes ciclicos
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+Sumario <- summary(Modelo_1)
+Resultados <- Sumario[["coefficients"]] %>% as.data.frame()
+
+kable(Resultados,align="c")
+```
+
+***
+O ajuste de uma regressão com componentes ciclicos confirma a hipotese de componentes sazonais na receita.
+
+### Detalhes da Regressão com Dummies
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+rm(list=setdiff(ls(),c("Base_RECEITA","Serie_Volume","Base_Diff")))
+# Modelo com dummies
+
+Base_Aux <- Base_Diff
+Teste <- dummy(Base_Aux$Marcador_Mes,sep='_')   # Create Dummies Variables
+Base_Aux <- data.frame(Base_Aux,Teste)          # concatenate with before base
+
+names_base <- setdiff(names(Base_Aux),c("x","Marcador_Mes","Data_Diff","Marcador_Ano","Marcador_Mes_12"))
+Base_Reg2 <- Base_Aux[names_base]
+formula <- "Liquido_Diff~."
+Modelo_2 <- glm(data=Base_Reg2,formula, family=gaussian)
+regressao <- summary(Modelo_2)
+
+# results of the regression
+
+Resultados2 <- regressao[["coefficients"]] %>% as.data.frame()
+
+Predito <- predict(Modelo_2)
+R2 <- 1-var(Base_Reg2$Liquido_Diff-Predito)/var(Base_Reg2$Liquido_Diff)
+kable(Resultados2,align = "c")
+```
+
+
+Row {.tabset .tabset-fade}
+-------------------------------------
+### Sazonalidade - Retornos
+
+Classicamente é comum o uso de séries de retorno para análise de comportamento atípico  na série. Usamos tal decomposição para analise da sazonalidade.
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+
+
+data_Inicial <- Serie_Volume  %>% time() %>% as.numeric() %>% date_decimal() %>%  as.Date() 
+minimo_data <- data_Inicial %>% min()
+
+retornos <- NULL
+for(k in 2: length(Serie_Volume))
+{
+  retornos[k] <- Serie_Volume[k]/Serie_Volume[k-1] 
+}
+
+retornos2 <- NULL
+for(k in 2: length(Serie_Volume))
+{
+  retornos2[k] <-log(retornos[k],base=exp(1))
+}
+
+serie_retornos <- ts(retornos2,start = c(year(minimo_data),month(minimo_data)),freq=12)
+
+
+
+### marcadores de ano e mes
+Marcador_Mes  <- month(ymd(data_Inicial[-1]))
+Marcador_Ano  <- year(ymd(data_Inicial[-1]))
+
+# Base final
+Base_Retornos1 <- data.frame(data_Inicial[-1],retornos_ln=retornos2[-1],Marcador_Mes,Marcador_Ano) 
+
+Base_Retornos <- data.frame(x=1:nrow(Base_Retornos1),Base_Retornos1)
+names(Base_Retornos) <- c("x","data_inicial","retornos_ln","Marcador_Mes","Marcador_Ano")
+```
+
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+
+# visualizacao do boxplot
+
+grafico2<-ggplot(Base_Retornos, aes(x = as.factor(Marcador_Mes), y = retornos_ln, fill=as.factor(Marcador_Mes)))
+grafico2 <- grafico2+ geom_boxplot()
+grafico2 <- grafico2+labs(title="Variabilidade dos log dos retornos",x="Mes",y="log do retorno")
+grafico2 <- grafico2+ guides(fill = "none")
+ggplotly(grafico2)
+```
+
+
+### Modelos Regressivos
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+# modelo de sazonalidade
+## modelo ciclic0
+formula <- "retornos_ln~x+sin(2*pi*x/12)+cos(2*pi*x/12)+sin(4*pi*x/12)+cos(4*pi*x/12)"
+Modelo_1 <- glm(data=Base_Retornos,formula, family=gaussian)
+
+minimo <- min(ymd(as.Date(Base_Retornos$data_inicial)))
+
+ fit <- ts(fitted(Modelo_1),start=c(year(minimo),month(minimo)),freq=12)
+
+ts.plot(cbind(serie_retornos,fit),col=c(1,2), main="ajuste com GLM")
+
+```
+
+### Detalhes da Regressão com componentes ciclicos
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+Sumario <- summary(Modelo_1)
+Resultados <-  Sumario[["coefficients"]] %>% as.data.frame()
+kable(Resultados,align="c")
+```
+
+***
+O ajuste de uma regressão com componentes ciclicos confirma a hipotese de componentes sazonais na receita.
+
+### Detalhes da Regressão com Dummies
+
+```{r,echo=FALSE,fig.height=5,fig.width=10,fig.align='center',warning=FALSE}
+rm(list=setdiff(ls(),c("Base_RECEITA","Serie_Volume","Base_Diff","serie_retornos","Base_Retornos")))
+# Modelo com dummies
+
+Base_Aux <- Base_Retornos
+Teste <- dummy(Base_Retornos$Marcador_Mes,sep='_')   # Create Dummies Variables
+Base_Aux <- data.frame(Base_Retornos,Teste)          # concatenate with before base
+
+names_base <- setdiff(names(Base_Aux),c("x","Marcador_Mes","Marcador_Ano","Marcador_Mes_12"))
+Base_Reg2 <- Base_Aux[names_base]
+formula <- "retornos_ln~."
+Modelo_2 <- glm(data=Base_Reg2,formula, family=gaussian)
+regressao <- summary(Modelo_2)
+
+# results of the regression
+
+Resultados2 <- regressao[["coefficients"]] %>% as.data.frame()
+
+Predito <- predict(Modelo_2)
+R2 <- 1-var(Base_Reg2$retornos_ln-Predito)/var(Base_Reg2$retornos_ln)
+kable(Resultados2,align = "c")
+```
+
+
+  

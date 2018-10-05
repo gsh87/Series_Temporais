@@ -1,0 +1,490 @@
+---
+title: "GLM e Arima nos Residuos com Cross Validation"
+output: 
+  flexdashboard::flex_dashboard:
+    vertical_layout: scroll
+    smooth_scroll: TRUE
+---
+
+<style type="text/css">
+
+.chart-title {  /* chart_title  */
+   font-size: 20px;
+</style>
+
+<!-- ################################################# -->
+
+```{r,echo=FALSE,include=FALSE}
+################################### 0 - Limpeza
+# removendo lixo da memoria
+rm(list=ls())
+set.seed(123)
+```
+
+```{r,echo=FALSE,results='hide',warning=FALSE,message=FALSE}
+## 1 - Pacotes
+options(repos=c(CRAN="http://vps.fmvz.usp.br/CRAN/"))
+library(pacman)    # pacote para load das bibliotecas
+p_load(stats)     #  Modelos ARIMA
+p_load(agricolae)# testes
+p_load(lmtest)    # testes de residuos
+p_load(randtests) # pacotes de testes estatisticos
+p_load(rms)       # pacote para stepwise
+p_load(forecast)  # forecast
+p_load(smooth)    # SMA - simple moving average
+p_load(BETS)      # Brazilian Economics Time Series
+p_load(normtest) # normalidade dos residuos
+p_load(nnfor)     # neural networks for time series
+p_load(broom)     # convert statistical anlysis objects in data frames
+## pacotes graficos ##
+p_load(ggplot2)   # grafico
+p_load(ggthemes)  # grafico 
+p_load(gridExtra) # Graficos em matrizes
+p_load(plotly)    # interative graphics
+
+## pacotes de manipulacao ##
+p_load(lubridate) # tratamento de datas
+p_load(bizdays)
+p_load(plyr)     # empilhamento
+p_load(magrittr)   # pipeline
+p_load(dplyr)      # manipulacao de base
+p_load(knitr)       # apresentacao
+p_load(DescTools)      # summary grafico
+p_load(RODBC)          # conexao ODC
+p_load(sqldf)          # sqldf
+p_load(corrplot)       # correlacao
+p_load(prais)
+p_load(Metrics)
+p_load(dummies)
+p_load(reshape2)       # empilha as colunas usando uma flag
+p_load(tidyr)
+p_load(Amelia)   ## missings
+p_load(ggseas)   ## tratamento de sazonalidade
+
+## Packages visual
+p_load(flexdashboard)
+p_load(DT)
+p_load(data.table)
+
+## pacotes de conexao
+p_load(sqldf)         # manipulicao usando linguagem sql
+p_load(RODBC)         # pacote para a conecao
+
+
+## strings
+p_load(stringr)
+
+
+## Datatable
+p_load(datatable)
+```
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+data("AirPassengers")
+Serie <- AirPassengers
+
+Data <- Serie %>% as.Date()
+Mes <- month(Data) %>% factor()
+Semana <- wday(Data) %>% factor()
+Qts <- as.matrix(Serie)[,1]
+
+## Data frame com as variaveis
+minimo <- min(Data) %>% as.Date()
+maximo <- max(Data) %>% as.Date()
+
+# construção do data frame
+Base <- data.frame(Data,Mes,Semana,Qts)
+### constroi a sequencia d horas (evitar nulls)
+Data <- seq(from=minimo,
+                     to=maximo,
+                     by="month")
+Base2 <- data.frame(Data)
+base_final <- left_join(Base2, Base) 
+base_final$Seq <- seq(1:nrow(base_final))
+### Verifica a existencia de missings
+#missmap(base_final)
+rm(list = setdiff(ls(),c("base_final","Serie")))
+
+```
+
+# Descritiva {data-orientation=rows}
+
+Row
+-------------------------------------
+### Distribuicao da Quantidade
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+grafico1 <- ggplot(base_final,aes(x=Qts))+
+            geom_histogram(aes(y=..density..),fill="steelblue",col="black",alpha=0.7) +
+            geom_density(alpha=0.2,fill="#FF6666")+
+            geom_vline(aes(xintercept=mean(Qts)),color="brown")+
+            ggtitle("Distribuição da Quantidade")
+grafico1
+```
+
+Row
+-------------------------------------
+### Dispersao e tendencia Central
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+Media_Densidade <-base_final %>% summarise(Media = mean(Qts),
+                                         Desvio_Padrao = sd(Qts),
+                                         Minimo = min(Qts),
+                                         Maximo = max(Qts),
+                                         Primeiro_Quantil=quantile(Qts,0.25),
+                                         Mediana = quantile(Qts,0.5),
+                                         Terceiro_Quantil=quantile(Qts,0.75)) %>% round(2)
+datatable(Media_Densidade)
+```
+
+Row
+-------------------------------------
+### Distribuicao da densidade por Mes 
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+grafico2 <- ggplot(base_final,aes(x=Mes,y=Qts))+
+            geom_boxplot(fill="steelblue",alpha=0.7,outlier.colour = "#1F3552", outlier.shape = 20) + 
+            scale_x_discrete(name = "Mes") +
+            scale_y_continuous(name = "Qts")+
+            ggtitle("Distribuicao das Qts por Mes")
+grafico2
+```
+
+Row
+-------------------------------------
+### Decomposição da serie
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+
+grafico3 <- ggsdc(base_final,aes(x = Data, y = Qts,fill="royalblue"),method = "decompose",frequency = 12) +
+           geom_line(colour="royalblue") +
+           labs(x = " Ano   \n  ", colour = "royalblue")  +
+           ggtitle("Decomposicao da Serie") 
+
+
+grafico3
+
+
+# Decomposicao <- decompose(Serie)
+# Serie_sazonal <- Decomposicao$seasonal
+# Serie_Tendencia <- Decomposicao$trend
+# Serie_Ruido <- Decomposicao$random
+# Datas_Aux <- Serie_sazonal %>%  as.Date()
+# 
+# Sazonal <- Serie_sazonal %>% as.numeric()
+# Tendencia <- Serie_Tendencia %>% as.numeric()
+# Aleatorio <- Serie_Ruido %>% as.numeric()
+
+
+# base_aux <- data.frame(Data=Datas_Aux)
+# base_final <- left_join(base_final,base_aux)
+```
+
+
+
+
+# Modelo Ajustado {data-orientation=rows}
+Row
+-------------------------------------
+### Modelo Ajustado
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+## DbDensidade = upax
+
+Modelo_GLM_Arima_Fit <- function (base_final){
+  ########## tendencia
+  Modelo_Trend <- lm(Qts~Seq,base_final)
+  fit_Trend <- Modelo_Trend$fitted
+  #ts.plot(cbind(base_final$Qts,fit_Trend))
+  
+  ########## Sazonalidade
+  ## retira a tendencia
+  base_sazonalidade <- base_final %>% mutate(Sazonal=Qts-fit_Trend, fit_Trend)
+  #ts.plot(base_sazonalidade$Sazonal)
+  Modelo_Sazonal <- glm("Sazonal ~ Mes + Semana ", base_sazonalidade, family = gaussian)
+  fit_Sazonal <- Modelo_Sazonal$fitted.values
+  #ts.plot(cbind(base_sazonalidade$Sazonal,fit_Sazonal))
+  
+  ########## ruido
+   ## retira a tendencia e sazonalidade
+  base_ruido <- base_sazonalidade %>% mutate(Ruido=Sazonal-fit_Sazonal,fit_Sazonal)
+  #ts.plot(base_ruido$Ruido)
+  
+  Modelo_Ruido <- auto.arima(base_ruido %>% select(Ruido))
+  fit_Ruido <- fitted(Modelo_Ruido)
+  #ts.plot(cbind(base_ruido$Ruido,fit_Ruido))
+  
+  
+  ########## fit final
+  Real <- base_final$Qts
+  Fit_Modelos <- ifelse(is.na(fit_Trend),0,fit_Trend)+
+               ifelse(is.na(fit_Sazonal),0,fit_Sazonal)+
+               ifelse(is.na(fit_Ruido),0,fit_Ruido)
+  
+  #### guarda os resultados
+  Resultados_fit <-  base_ruido %>% mutate(Fit_final=Fit_Modelos,
+                                           fit_Ruido,
+                                           Desvio=Qts-Fit_Modelos)
+  ### metricas de ajuste
+  R2_Regressao_fit <- 1-var(Fit_Modelos-Real)/var(Real)
+  
+  MAE_Fit <- mae(Real,Fit_Modelos)
+  
+  RMSE_Fit <- rmse(Real,Fit_Modelos)
+  
+  Metricas_fit <- data.frame(R2_fit=R2_Regressao_fit,
+                             MAE_Fit,
+                             RMSE_Fit)
+
+  return(list(Resultados_fit,Metricas_fit))
+} 
+
+Modelo_fit <- Modelo_GLM_Arima_Fit(base_final)
+
+```
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+## graficos
+Base_Grafico1 <- Modelo_fit[[1]]
+Base_Grafico1$Data %<>% as.Date() 
+Grafico1 <- ggplot(Base_Grafico1,aes(x=Seq))+
+             geom_line(aes(y=Qts,colour = "Real")) +
+             geom_line(aes(y=Fit_final,colour = "Fit"))+
+             scale_color_manual(values = c("red", "royalblue")) +
+            labs(title="Real vs Ajustado",
+                 subtitle="Modelos para Tendencia e Sazonalidade e Ruido",x="Data",y="Qts")+
+  guides(fill=guide_legend(title=NULL))+
+  theme(legend.title=element_blank(),legend.position="bottom")
+Grafico1
+```
+
+
+Row
+-------------------------------------
+### Metricas de ajuste
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+## Metricas de ajuste
+Base_Grafico2 <- Modelo_fit[[2]] %>% round(2)
+
+datatable(Base_Grafico2)
+```
+
+Row
+-------------------------------------
+### Probabilidade dos Desvios
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+Probabilidade <-  NULL
+for (i in 1:25){
+  Probabilidade[i] <- sum(ifelse(abs(Base_Grafico1$Desvio) >= i,1,0))/nrow(Base_Grafico1)
+}
+
+Erro <-  seq(1:25)
+Base_Probabilidades <-  as.data.frame(cbind(Erro, Probabilidade))
+Grafico_Probabilidades <-ggplot(data=Base_Probabilidades, aes(x=Erro, y=Probabilidade) ) +
+  geom_bar(stat="identity", fill="steelblue")+
+  theme_minimal() + ggtitle("Probabilidade do Modelo Predizer Corretamente em Menos de X unidades")+geom_text(aes(label=Probabilidade %>% round(2)), vjust=-0.4)
+Grafico_Probabilidades
+
+```
+
+
+
+
+<!-- ################################################# -->
+
+# Cross Validation "Holdout" {data-orientation=rows}
+
+
+
+```{r,echo=FALSE,fig.align='center',warning=FALSE}
+
+Modelo_GLM_Arima_Cross <- function (base_final, Pontos=12){
+  base_regressao <- base_final
+  base_regressao$Sequencia <- 1:nrow(base_regressao)
+  taxa_particao <- 1-Pontos/nrow(base_regressao)
+  tamanho_particao <- (nrow(base_regressao)*taxa_particao) %>% round()
+  
+  Base_aprendizado <- base_regressao %>% filter(Sequencia<=tamanho_particao)
+  Base_teste <- base_regressao %>% filter(Sequencia>tamanho_particao)
+
+  
+  #### treino ########## treino ########## treino ########## treino ######
+  ########## tendencia
+  Modelo_Trend <- lm(Qts~Seq,Base_aprendizado)
+  fit_Trend <- Modelo_Trend$fitted
+  #ts.plot(cbind(base_final$Qts,fit_Trend))
+  
+  ########## Sazonalidade
+  ## retira a tendencia
+  base_sazonalidade <- Base_aprendizado %>% mutate(Sazonal=Qts-fit_Trend, fit_Trend)
+  #ts.plot(base_sazonalidade$Sazonal)
+  Modelo_Sazonal <- glm("Sazonal ~ Mes + Semana ", base_sazonalidade, family = gaussian)
+  fit_Sazonal <- Modelo_Sazonal$fitted.values
+  #ts.plot(cbind(base_sazonalidade$Sazonal,fit_Sazonal))
+  
+  ########## ruido
+   ## retira a tendencia e sazonalidade
+  base_ruido <- base_sazonalidade %>% mutate(Ruido=Sazonal-fit_Sazonal,fit_Sazonal)
+  #ts.plot(base_ruido$Ruido)
+  
+  Modelo_Ruido <- auto.arima(base_ruido %>% select(Ruido))
+  fit_Ruido <- fitted(Modelo_Ruido)
+  #ts.plot(cbind(base_ruido$Ruido,fit_Ruido))
+  
+  
+  
+   ########## fit final no aprendizado
+  Real <- Base_aprendizado$Qts
+  Fit_Modelos <- ifelse(is.na(fit_Trend),0,fit_Trend)+
+               ifelse(is.na(fit_Sazonal),0,fit_Sazonal)+
+               ifelse(is.na(fit_Ruido),0,fit_Ruido)
+  
+  #### guarda os resultados
+  Resultados_fit <-  base_ruido %>% mutate(Fit_final=Fit_Modelos,
+                                           fit_Ruido,
+                                           Desvio=Qts-Fit_Modelos)
+  ### metricas de ajuste
+  R2_Regressao_fit <- 1-var(Fit_Modelos-Real)/var(Real)
+  
+  MAE_final_fit <- mae(Real,Fit_Modelos)
+  RMSE_final_fit <- rmse(Real,Fit_Modelos)
+  
+ 
+  #### Teste ########## Teste ########## Teste ########## Teste ######
+  tamanho_predicao <- nrow(Base_teste) %>% as.numeric()
+  
+  predito_Trend <- predict.lm(Modelo_Trend,Base_teste %>% select(-Qts))
+  predito_Sazonal <- stats::predict(Modelo_Sazonal,newdata=Base_teste,type="response")
+  predito_Ruido <- stats::predict(Modelo_Ruido,n.ahead=tamanho_predicao)$pred %>% as.numeric()
+  
+  predito_final <- predito_Trend+predito_Sazonal+predito_Ruido
+  
+  
+  
+  
+  
+  ### data frame com as metricas ajustadas 
+    Resultados_final_Cross <- data.frame(Data=Base_teste$Data,
+                                         Real=Base_teste$Qts,
+                                       Fit=predito_final) %>% 
+  mutate(Desvio=Real-round(predito_final))
+   Resultados_final_Cross %<>% mutate(Seq=1:nrow(Resultados_final_Cross))
+ 
+   ### metricas cross validation
+  R2_Regressao_Cross <- 1-var(Resultados_final_Cross$Real-Resultados_final_Cross$Fit)/var(Resultados_final_Cross$Real)
+  MAE_final_Cross<- mae(Resultados_final_Cross$Real,Resultados_final_Cross$Fit)
+  RMSE_final_Cross <- rmse(Resultados_final_Cross$Real,Resultados_final_Cross$Fit)
+
+
+Resultados_final_Metricas_Cross <- data.frame(MAE_final_fit,RMSE_final_fit,R2_Regressao_fit,MAE_final_Cross,RMSE_final_Cross,R2_Regressao_Cross) %>% round(3)
+
+
+### Retorna uma lista com os dados preditos e com as metricas do cross
+return(list(Resultados_final_Cross,Resultados_final_Metricas_Cross))
+}
+
+
+Modelo_cross <- Modelo_GLM_Arima_Cross(base_final,Pontos=6)
+Base_Ajustada <- Modelo_cross[[1]]
+Base_Metricas <- Modelo_cross[[2]]
+
+```
+
+Row
+---------------------------------------
+### Predito e Realizado 
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+
+grafico0 <- ggplot(Base_Ajustada,aes(x=Seq))+
+            geom_line(aes(y=Real,colour="Real"))+
+            geom_line(aes(y=Fit,colour="Fit_SARIMA"))+
+            labs(title="Validacao Cruzada",
+                 subtitle="Qts por Mes",x="",y="Qts")+
+  guides(fill=guide_legend(title=NULL))+
+  theme(legend.title=element_blank(),legend.position="bottom")
+grafico0
+
+
+```
+
+Row
+---------------------------------------
+### Metricas do Cross
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+datatable(Base_Metricas)
+```
+
+
+# Cross Validation "Kfolds" {data-orientation=rows}
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+
+Cross_Kfolds <- function(Kfolds=4,Predicoes=5,DbDensidade)
+{
+  Linhas_full <- nrow(DbDensidade) %>% as.numeric()
+  Base_Kfolds <- NULL
+  for (k in 1:Kfolds)
+  {
+    limsup <- Linhas_full-(Kfolds-k)*Predicoes
+    Base_Aux <- head(DbDensidade,limsup)
+    Modelo_cross <- Modelo_GLM_Arima_Cross(Base_Aux,Pontos=Predicoes)
+    if(k==1)
+    {
+      Base_Kfolds <- cbind(Modelo_cross[[2]],Kfold=k)
+    }
+    else
+    {
+      Base_aux <- cbind(Modelo_cross[[2]],Kfold=k)
+      Base_Kfolds <- rbind(Base_Kfolds,Base_aux)
+    }
+    
+  }
+  return(Base_Kfolds)
+}
+
+Base_cross_kfolds <- Cross_Kfolds(Kfolds=4,Predicoes=5,base_final)
+
+```
+
+Row
+---------------------------------------
+### MAE
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+subtitulo <- paste("Valores das Metricas para Kfolds = ",nrow(Base_cross_kfolds),sep="")
+grafico3 <- ggplot(Base_cross_kfolds,aes(x=Kfold))+
+            geom_line(aes(y=MAE_final_fit,colour="MAE_final_fit"))+
+            geom_line(aes(y=MAE_final_Cross,colour="MAE_final_Cross"))+
+            labs(title="Evolução do MAE no Fit e Cross",
+                 subtitle=subtitulo,x="Data",y="Valores")+
+            guides(fill=guide_legend(title=NULL))+
+  theme(legend.title=element_blank(),legend.position="bottom")
+grafico3
+```
+
+Row
+---------------------------------------
+### RMSE
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+subtitulo <- paste("Valores das Metricas para Kfolds = ",nrow(Base_cross_kfolds),sep="")
+grafico3 <- ggplot(Base_cross_kfolds,aes(x=Kfold))+
+            geom_line(aes(y=RMSE_final_fit,colour="RMSE_final_fit"))+
+            geom_line(aes(y=RMSE_final_Cross,colour="RMSE_final_Cross"))+
+            labs(title="Evolução do RMSE no Fit e Cross",
+                 subtitle=subtitulo,x="Data",y="Valores")+
+            guides(fill=guide_legend(title=NULL))+
+  theme(legend.title=element_blank(),legend.position="bottom")
+grafico3
+```
+
+Row
+---------------------------------------
+### Tabelas MAE e RMSE
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+datatable(Base_cross_kfolds %>% round(2))
+
+```
+
+

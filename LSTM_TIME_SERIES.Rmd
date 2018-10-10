@@ -1,0 +1,834 @@
+---
+title: "LSTM in Times Series  R"
+output: 
+  flexdashboard::flex_dashboard:
+    vertical_layout: scroll
+    smooth_scroll: TRUE
+---
+
+<style type="text/css">
+
+.chart-title {  /* chart_title  */
+   font-size: 20px;
+</style>
+
+Principal referencia [r Blogers](https://www.r-bloggers.com/time-series-deep-learning-forecasting-sunspots-with-keras-stateful-lstm-in-r/)
+
+```{r,echo=FALSE,include=FALSE}
+################################### 0 - Limpeza
+# removendo lixo da memoria
+rm(list=ls())
+set.seed(123)
+```
+
+```{r,echo=FALSE,results='hide',warning=FALSE,message=FALSE}
+## 1 - Pacotes
+options(repos=c(CRAN="http://vps.fmvz.usp.br/CRAN/"))
+library(pacman)    # pacote para load das bibliotecas
+p_load(tidyverse)
+p_load(magrittr)   # pipeline
+# Time Series
+p_load(timetk)
+p_load(tidyquant)
+p_load(tibbletime)
+
+# Visualization
+p_load(cowplot)
+p_load(ggseas)   ## tratamento de sazonalidade
+
+# Preprocessing
+p_load(recipes)  ## normalizacao da base de dados
+
+# Sampling / Accuracy
+p_load(rsample)
+p_load(Metrics) 
+
+# Modeling
+p_load(keras)
+p_load(sarima)
+p_load(forecast)
+
+# metrics
+p_load(Metrics)
+
+## Packages visual
+p_load(flexdashboard)
+p_load(DT)
+p_load(data.table)
+
+
+```
+
+# Visualizacao e Correlacao {data-orientation=rows}
+Row
+-------------------------------------
+
+### Visualizacao da serie
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+sun_spots <- datasets::sunspot.month %>% tk_tbl() %>% mutate(index=as_date(index)) %>% as_tbl_time(index=index)
+
+p1 <- sun_spots %>%
+    ggplot(aes(index, value)) +
+    geom_point(color = palette_light()[[1]], alpha = 0.5) +
+    theme_tq() +
+    labs(
+        title = "From 1749 to 2013 (Full Data Set)"
+    )
+
+p2 <- sun_spots %>%
+    filter_time("start" ~ "1800") %>%
+    ggplot(aes(index, value)) +
+    geom_line(color = palette_light()[[1]], alpha = 0.5) +
+    geom_point(color = palette_light()[[1]]) +
+    geom_smooth(method = "loess", span = 0.2, se = FALSE) +
+    theme_tq() +
+    labs(
+        title = "1749 to 1800 (Zoomed In To Show Cycle)",
+        caption = "datasets::sunspot.month"
+    )
+
+p_title <- ggdraw() + 
+    draw_label("Sunspots", size = 18, fontface = "bold", colour = palette_light()[[1]])
+
+plot_grid(p_title, p1, p2, ncol = 1, rel_heights = c(0.1, 1, 1))
+
+```
+
+
+Row
+-------------------------------------
+
+### Avaliacao do ACF
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+### analise da possibilidade do uso de LSTM (Necessario que a serie apresente autocorrelacao)
+## funcao que retorna as autocorrelacoes em tabela
+tidy_acf <- function(data, value, lags = 0:20) {
+    
+    value_expr <- enquo(value)
+    
+    acf_values <- data %>%
+        pull(value) %>%
+        acf(lag.max = tail(lags, 1), plot = FALSE) %>%
+        .$acf %>%
+        .[,,1]
+    
+    ret <- tibble(acf = acf_values) %>%
+        rowid_to_column(var = "lag") %>%
+        mutate(lag = lag - 1) %>%
+        filter(lag %in% lags)
+    
+    return(ret)
+}
+
+### vamos avaliar as autocorrelacoes até o lag 600
+max_lag <- 600
+Tabela_Acf <- tidy_acf(sun_spots,lags=0:max_lag)
+
+### plotamos o grafico para visualizacao
+Grafico1 <- ggplot(Tabela_Acf,aes(lag,acf))+
+              geom_segment(aes(xend=lag,yend=0),color=palette_light()[[1]])+
+              geom_vline(xintercept = 120,size=3,color=palette_light()[[2]])+
+              annotate("text", label = "10 anos", x = 130, y = 0.8,color = palette_light()[[2]], size = 6, hjust = 0) +
+              theme_tq() +
+              labs(title = "Funcoes de Autocorrelação")
+
+Grafico1
+ 
+####### Como a autocorrelacao é alta em dez anos, podemos usar o lstm
+```
+
+Row
+-------------------------------------
+
+### Avaliacao do ACF local em torno dos 115 até 120 lags
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+Tabela_Acf2 <-tidy_acf(sun_spots,lags=115:135)
+Grafico2 <- ggplot(Tabela_Acf2,aes(lag, acf)) +
+              geom_vline(xintercept = 120, size = 3, color = palette_light()[[2]]) +
+              geom_segment(aes(xend = lag, yend = 0), color = palette_light()[[1]]) +
+              geom_point(color = palette_light()[[1]], size = 2) +
+              geom_label(aes(label = acf %>% round(2)), vjust = -1,color = palette_light()[[1]]) +
+              annotate("text", label = "10 anos", x = 121, y = 0.8,color = palette_light()[[2]], size = 5, hjust = 0) +
+              theme_tq() +
+              labs(title = "ACF",subtitle = "Lags entre 115 até 135")
+Grafico2
+
+#### por inspecao nota-se que no lag 125 ocorre o maximo da autocorrelacao
+
+lag_otimo <- Tabela_Acf2 %>% filter(acf==max(acf)) %>% pull(lag)
+
+```
+
+
+
+# Backtesting {data-orientation=rows}
+Row
+-------------------------------------
+### Construcao dos slices
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+### backtesting é o slide windows para series temporais
+### a estrategia sera de 50 anos para aprendizado (initial = 12x50) e 10 anos para validacao (assess=12x10) além de um salto de 20 anos (skip = 12x20) para distruibuir as 11 amostras nos 265 anos de machas solares. Definimos cumulative = FALSE para que os modelos mais recentes nao recebam acumulo de dados.
+
+periodos_treino <- 12*50
+periodos_teste <- 12*10
+skip_span <- 12*20
+rolling_origin_resamples <- rolling_origin(sun_spots,
+                                           initial=periodos_treino,
+                                           assess=periodos_teste,
+                                           cumulative=FALSE,
+                                           skip=skip_span)
+
+
+### visualizacao das janelas
+
+plot_split <- function(split, expand_y_axis = TRUE, alpha = 1, size = 1) {
+    
+    # Manipulate data
+    train_tbl <- training(split) %>%
+        add_column(key = "training") 
+    
+    test_tbl  <- testing(split) %>%
+        add_column(key = "testing") 
+    
+    data_manipulated <- bind_rows(train_tbl, test_tbl) %>%
+        as_tbl_time(index = index) %>%
+        mutate(key = fct_relevel(key, "training", "testing"))
+        
+    # Collect attributes
+    train_time_summary <- train_tbl %>%
+        tk_index() %>%
+        tk_get_timeseries_summary()
+    
+    test_time_summary <- test_tbl %>%
+        tk_index() %>%
+        tk_get_timeseries_summary()
+    
+    # Visualize
+    g <- data_manipulated %>%
+        ggplot(aes(x = index, y = value, color = key)) +
+        geom_line(size = size, alpha = alpha) +
+        theme_tq() +
+        scale_color_tq() +
+        labs(
+            title    = paste(" Visualizacao do Split:",split$id,sep=" "),
+            subtitle = paste(train_time_summary$start,"to",test_time_summary$end,seep=" "),
+            y = "", x = ""
+        ) +
+        theme(legend.position = "none") 
+    
+    if (expand_y_axis) {
+        
+        sun_spots_time_summary <- sun_spots %>% 
+            tk_index() %>% 
+            tk_get_timeseries_summary()
+        
+        g <- g +
+            scale_x_date(limits = c(sun_spots_time_summary$start, 
+                                    sun_spots_time_summary$end))
+    }
+    
+    return(g)
+}
+
+
+### plot o slice de ordem 1
+slice1 <- rolling_origin_resamples$splits[[1]]
+grafico2 <- plot_split(slice1,expand_y_axis=TRUE)
+grafico2
+```
+
+
+Row
+-------------------------------------
+### Visualizacao dos slices
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+### funcao para plotar todas as abordagem de slice
+plot_sampling_plan <- function(rolling_origin_resamples, expand_y_axis = TRUE, 
+                               ncol = 3, alpha = 1, size = 1,title = "Backtesting") {
+    
+    # Map plot_split() to sampling_tbl
+    sampling_tbl_with_plots <- rolling_origin_resamples %>%
+        mutate(gg_plots = map(splits, plot_split, 
+                              expand_y_axis = expand_y_axis,
+                              alpha = alpha))
+  
+    # Make plots with cowplot
+    plot_list <- sampling_tbl_with_plots$gg_plots 
+    
+    p_temp <- plot_list[[1]] + theme(legend.position = "bottom")
+    legend <- get_legend(p_temp)
+    
+    p_body  <- plot_grid(plotlist = plot_list, ncol = ncol)
+    
+    p_title <- ggdraw() + 
+        draw_label(title, size = 18, fontface = "bold", colour = palette_light()[[1]])
+    
+    g <- plot_grid(p_title, p_body, legend, ncol = 1, rel_heights = c(0.05, 1, 0.05))
+    
+    return(g)
+    
+}
+
+
+### visualizacao do backtesting
+Grafico3 <-plot_sampling_plan(rolling_origin_resamples,expand_y_axis = TRUE) 
+Grafico3
+
+```
+
+
+
+# Modelo para um slice {data-orientation=rows}
+Row
+-------------------------------------
+### visualizacao do slice
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+
+split <- rolling_origin_resamples$splits[[11]]
+split_id <- rolling_origin_resamples$id[[11]]
+
+Grafico4 <- plot_split(split,expand_y_axis = FALSE)
+Grafico4
+```
+
+Row
+-------------------------------------
+### Processamento da base
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+### quebra em base de treino e teste
+df_trn <- training(split)
+df_tst <- testing(split)
+
+df <- rbind(df_trn %>% add_column(key = "training"),
+            df_tst %>% add_column(key = "testing")) %>% as_tbl_time(index=index)
+
+### processamento com o library Recipes.
+### o LSTM requer que a base de dados seja  normalizado usamos o pacote Recipes
+rec_obj <- recipe(value~.,df) %>% 
+                  step_sqrt(value) %>%     ### transformacao quadratica para eliminar erros
+                  step_center(value) %>%   ### centralizacao dos dados
+                  step_scale(value) %>%    ### scala de normalizacao
+                  prep()
+
+df_processed_tbl <- bake(rec_obj,df)   ### aplica as normalizacoes para a base de dados
+
+
+
+### guardamos os valores do centro e escala para invertermos a transformacao
+center_history <- rec_obj$steps[[2]]$means["value"]
+scale_history <- rec_obj$steps[[3]]$sds["value"]
+
+normalizacao <- data.frame(center_history,scale_history) %>% round(5)
+normalizacao
+```
+
+
+Row
+-------------------------------------
+### Modelo
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+# Tensor Format: 
+# Predictors (X) must be a 3D Array with dimensions: [samples, timesteps, features]: The first dimension is the length of values, the second is the number of time steps (lags), and the third is the number of predictors (1 if univariate or n if multivariate)
+# Outcomes/Targets (y) must be a 2D Array with dimensions: [samples, timesteps]: The first dimension is the length of values and the second is the number of time steps (lags)
+# 
+# Training/Testing:
+# The training and testing length must be evenly divisible (e.g. training length / testing length must be a whole number)
+# 
+# Batch Size:
+# The batch size is the number of training examples in one forward/backward pass of a RNN before a weight update
+# The batch size must be evenly divisible into both the training an testing lengths (e.g. training length / batch size and testing length / batch size must both be whole numbers)
+# 
+# Time Steps:
+# A time step is the number of lags included in the training/testing set
+# For our example, our we use a single lag
+# 
+# Epochs:
+# The epochs are the total number of forward/backward pass iterations
+# Typically more improves model performance unless overfitting occurs at which time the validation accuracy/loss will not improve
+
+#### paramentros do modelo
+lag_setting <- nrow(df_tst)
+batch_size <- 40
+train_length <- 440
+tsteps <- 1
+epochs <- 300
+
+
+
+# Training Set
+lag_train_tbl <- df_processed_tbl %>%
+    mutate(value_lag = lag(value, n = lag_setting)) %>%
+    filter(!is.na(value_lag)) %>%
+    filter(key == "training") %>%
+    tail(train_length)
+
+x_train_vec <- lag_train_tbl$value_lag
+x_train_arr <- array(data = x_train_vec, dim = c(length(x_train_vec), 1, 1))
+
+y_train_vec <- lag_train_tbl$value
+y_train_arr <- array(data = y_train_vec, dim = c(length(y_train_vec), 1))
+
+# Testing Set
+lag_test_tbl <- df_processed_tbl %>%
+    mutate(
+        value_lag = lag(value, n = lag_setting)
+    ) %>%
+    filter(!is.na(value_lag)) %>%
+    filter(key == "testing")
+
+x_test_vec <- lag_test_tbl$value_lag
+x_test_arr <- array(data = x_test_vec, dim = c(length(x_test_vec), 1, 1))
+
+y_test_vec <- lag_test_tbl$value
+y_test_arr <- array(data = y_test_vec, dim = c(length(y_test_vec), 1))
+
+###################
+
+### modelo lstm
+model <- keras_model_sequential()
+model  %>%  layer_lstm(units = 50,
+                     input_shape = c(tsteps,1),
+                     batch_size = batch_size,
+                     return_sequences = TRUE,
+                     stateful = TRUE) %>% 
+          layer_lstm(units = 50,
+                     return_sequences = FALSE,
+                     stateful = TRUE) %>% 
+          layer_dense(units=1)
+model %>%  compile(loss='mae',optimizer = 'adam')
+
+model
+
+### fitting
+for (i in 1:epochs) {
+    model %>% fit(x          = x_train_arr, 
+                  y          = y_train_arr, 
+                  batch_size = batch_size,
+                  epochs     = 1, 
+                  verbose    = 1, 
+                  shuffle    = FALSE)
+    
+    model %>% reset_states()
+    cat("Epoch: ", i)
+    
+}
+
+
+### predict
+# Make Predictions
+pred_out <- model %>% 
+    predict(x_test_arr, batch_size = batch_size) %>%
+    .[,1] 
+
+# Retransform values
+pred_tbl <- tibble(
+    index   = lag_test_tbl$index,
+    value   = (pred_out * scale_history + center_history)^2
+) 
+
+# Combine actual data with predictions
+tbl_1 <- df_trn %>%
+    add_column(key = "actual")
+
+tbl_2 <- df_tst %>%
+    add_column(key = "actual")
+
+tbl_3 <- pred_tbl %>%
+    add_column(key = "predict")
+
+# Create time_bind_rows() to solve dplyr issue
+time_bind_rows <- function(data_1, data_2, index) {
+    index_expr <- enquo(index)
+    bind_rows(data_1, data_2) %>%
+        as_tbl_time(index = !! index_expr)
+}
+
+ret <- list(tbl_1, tbl_2, tbl_3) %>%
+    reduce(time_bind_rows, index = index) %>%
+    arrange(key, index) %>%
+    mutate(key = as_factor(key))
+
+# plot da predicao
+plot_prediction <- function(data, id, alpha = 1, size = 2, base_size = 14) {
+    g <- data %>%
+        ggplot(aes(index, value, color = key)) +
+        geom_point(alpha = alpha, size = size) + 
+        theme_tq(base_size = base_size) +
+        scale_color_tq() +
+        theme(legend.position = "none") +
+        labs(
+            title = paste("Slide:",id,sep=" "),
+            x = "", y = ""
+        )
+    
+    return(g)
+}
+
+# no nosso caso 
+id <- split_id
+Grafico5 <- plot_prediction(ret,id)
+Grafico5
+
+
+### modulo do rmse
+
+calc_rmse <- function(ret) {
+        ret %>%
+            spread(key = key, value = value) %>%
+            select(-index) %>%
+            filter(!is.na(predict)) %>%
+            rename(
+                truth    = actual,
+                estimate = predict
+            ) %>%
+            yardstick::rmse(truth, estimate)
+}
+
+calc_rmse(ret)
+
+```
+
+
+
+# Modelo  com toda a serie {data-orientation=rows}
+Row
+-------------------------------------
+### Erro RMSE
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+predict_keras_lstm <- function(split, epochs = 300, ...) {
+    
+    lstm_prediction <- function(split, epochs, ...) {
+        
+        # 5.1.2 Data Setup
+        df_trn <- training(split)
+        df_tst <- testing(split)
+        
+        df <- bind_rows(
+            df_trn %>% add_column(key = "training"),
+            df_tst %>% add_column(key = "testing")
+        ) %>% 
+            as_tbl_time(index = index)
+        
+        # 5.1.3 Preprocessing
+        rec_obj <- recipe(value ~ ., df) %>%
+            step_sqrt(value) %>%
+            step_center(value) %>%
+            step_scale(value) %>%
+            prep()
+        
+        df_processed_tbl <- bake(rec_obj, df)
+        
+        center_history <- rec_obj$steps[[2]]$means["value"]
+        scale_history  <- rec_obj$steps[[3]]$sds["value"]
+        
+        # 5.1.4 LSTM Plan
+        lag_setting  <- 120 # = nrow(df_tst)
+        batch_size   <- 40
+        train_length <- 440
+        tsteps       <- 1
+        epochs       <- epochs
+        
+        # 5.1.5 Train/Test Setup
+        lag_train_tbl <- df_processed_tbl %>%
+            mutate(value_lag = lag(value, n = lag_setting)) %>%
+            filter(!is.na(value_lag)) %>%
+            filter(key == "training") %>%
+            tail(train_length)
+        
+        x_train_vec <- lag_train_tbl$value_lag
+        x_train_arr <- array(data = x_train_vec, dim = c(length(x_train_vec), 1, 1))
+        
+        y_train_vec <- lag_train_tbl$value
+        y_train_arr <- array(data = y_train_vec, dim = c(length(y_train_vec), 1))
+        
+        lag_test_tbl <- df_processed_tbl %>%
+            mutate(
+                value_lag = lag(value, n = lag_setting)
+            ) %>%
+            filter(!is.na(value_lag)) %>%
+            filter(key == "testing")
+        
+        x_test_vec <- lag_test_tbl$value_lag
+        x_test_arr <- array(data = x_test_vec, dim = c(length(x_test_vec), 1, 1))
+        
+        y_test_vec <- lag_test_tbl$value
+        y_test_arr <- array(data = y_test_vec, dim = c(length(y_test_vec), 1))
+                
+        # 5.1.6 LSTM Model
+        model <- keras_model_sequential()
+
+        model %>%
+            layer_lstm(units            = 50, 
+                       input_shape      = c(tsteps, 1), 
+                       batch_size       = batch_size,
+                       return_sequences = TRUE, 
+                       stateful         = TRUE) %>% 
+            layer_lstm(units            = 50, 
+                       return_sequences = FALSE, 
+                       stateful         = TRUE) %>% 
+            layer_dense(units = 1)
+        
+        model %>% 
+            compile(loss = 'mae', optimizer = 'adam')
+        
+        # 5.1.7 Fitting LSTM
+        for (i in 1:epochs) {
+            model %>% fit(x          = x_train_arr, 
+                          y          = y_train_arr, 
+                          batch_size = batch_size,
+                          epochs     = 1, 
+                          verbose    = 1, 
+                          shuffle    = FALSE)
+            
+            model %>% reset_states()
+            cat("Epoch: ", i)
+            
+        }
+        
+        # 5.1.8 Predict and Return Tidy Data
+        # Make Predictions
+        pred_out <- model %>% 
+            predict(x_test_arr, batch_size = batch_size) %>%
+            .[,1] 
+        
+        # Retransform values
+        pred_tbl <- tibble(
+            index   = lag_test_tbl$index,
+            value   = (pred_out * scale_history + center_history)^2
+        ) 
+        
+        # Combine actual data with predictions
+        tbl_1 <- df_trn %>%
+            add_column(key = "actual")
+        
+        tbl_2 <- df_tst %>%
+            add_column(key = "actual")
+        
+        tbl_3 <- pred_tbl %>%
+            add_column(key = "predict")
+        
+        # Create time_bind_rows() to solve dplyr issue
+        time_bind_rows <- function(data_1, data_2, index) {
+            index_expr <- enquo(index)
+            bind_rows(data_1, data_2) %>%
+                as_tbl_time(index = !! index_expr)
+        }
+        
+        ret <- list(tbl_1, tbl_2, tbl_3) %>%
+            reduce(time_bind_rows, index = index) %>%
+            arrange(key, index) %>%
+            mutate(key = as_factor(key))
+
+        return(ret)
+        
+    }
+    
+    safe_lstm <- possibly(lstm_prediction, otherwise = NA)
+    
+    safe_lstm(split, epochs, ...)
+    
+}
+
+# a funcao acima processa o modelo apenas para um slide, usaremos o map e o mutate para processar para todos os slides
+
+sample_predictions_lstm_tbl <- rolling_origin_resamples %>%
+     mutate(predict = map(splits, predict_keras_lstm, epochs = 100))
+
+
+## perfomance
+sample_rmse_tbl <- sample_predictions_lstm_tbl %>% mutate(rmse=map_dbl(predict,calc_rmse)) %>% select(id,rmse)
+
+Grafico6 <- ggplot(sample_rmse_tbl,aes(rmse))+
+            geom_histogram(aes(y=..density..),fill=palette_light()[[1]],bins=16)+
+            geom_density(fill=palette_light()[[1]],alpha=0.5)+
+            theme_tq()+
+            ggtitle("Histograma dos RMSE")
+Grafico6
+
+```
+
+Row
+-------------------------------------
+### visualizacao de todos os  slices
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+plot_predictions <- function(sampling_tbl, predictions_col, 
+                             ncol = 3, alpha = 1, size = 2, base_size = 14,
+                             title = "Backtested Predictions") {
+    
+    predictions_col_expr <- enquo(predictions_col)
+    
+    # Map plot_split() to sampling_tbl
+    sampling_tbl_with_plots <- sampling_tbl %>%
+        mutate(gg_plots = map2(!! predictions_col_expr, id, 
+                               .f        = plot_prediction, 
+                               alpha     = alpha, 
+                               size      = size, 
+                               base_size = base_size)) 
+    
+    # Make plots with cowplot
+    plot_list <- sampling_tbl_with_plots$gg_plots 
+    
+    p_temp <- plot_list[[1]] + theme(legend.position = "bottom")
+    legend <- get_legend(p_temp)
+    
+    p_body  <- plot_grid(plotlist = plot_list, ncol = ncol)
+    
+    
+    
+    p_title <- ggdraw() + 
+        draw_label(title, size = 18, fontface = "bold", colour = palette_light()[[1]])
+    
+    g <- plot_grid(p_title, p_body, legend, ncol = 1, rel_heights = c(0.05, 1, 0.05))
+    
+    return(g)
+    
+}
+
+grafico7 <- plot_predictions(sample_predictions_lstm_tbl,
+                             predictions_col = predict,
+                             alpha=0.5,
+                             size = 1,
+                             base_size = 10,
+                             title = "LSTM com todos os Slices")
+
+grafico7
+
+```
+
+Row
+-------------------------------------
+### Predicao para dez anos
+
+```{r,echo=FALSE,fig.height=8,fig.width=10,fig.align='center',warning=FALSE}
+predict_keras_lstm_future <- function(data, epochs = 300, ...) {
+    
+    lstm_prediction <- function(data, epochs, ...) {
+        
+        # 5.1.2 Data Setup (MODIFIED)
+        df <- data
+        
+        # 5.1.3 Preprocessing
+        rec_obj <- recipe(value ~ ., df) %>%
+            step_sqrt(value) %>%
+            step_center(value) %>%
+            step_scale(value) %>%
+            prep()
+        
+        df_processed_tbl <- bake(rec_obj, df)
+        
+        center_history <- rec_obj$steps[[2]]$means["value"]
+        scale_history  <- rec_obj$steps[[3]]$sds["value"]
+        
+        # 5.1.4 LSTM Plan
+        lag_setting  <- 120 # = nrow(df_tst)
+        batch_size   <- 40
+        train_length <- 440
+        tsteps       <- 1
+        epochs       <- epochs
+        
+        # 5.1.5 Train Setup (MODIFIED)
+        lag_train_tbl <- df_processed_tbl %>%
+            mutate(value_lag = lag(value, n = lag_setting)) %>%
+            filter(!is.na(value_lag)) %>%
+            tail(train_length)
+        
+        x_train_vec <- lag_train_tbl$value_lag
+        x_train_arr <- array(data = x_train_vec, dim = c(length(x_train_vec), 1, 1))
+        
+        y_train_vec <- lag_train_tbl$value
+        y_train_arr <- array(data = y_train_vec, dim = c(length(y_train_vec), 1))
+        
+        x_test_vec <- y_train_vec %>% tail(lag_setting)
+        x_test_arr <- array(data = x_test_vec, dim = c(length(x_test_vec), 1, 1))
+                
+        # 5.1.6 LSTM Model
+        model <- keras_model_sequential()
+
+        model %>%
+            layer_lstm(units            = 50, 
+                       input_shape      = c(tsteps, 1), 
+                       batch_size       = batch_size,
+                       return_sequences = TRUE, 
+                       stateful         = TRUE) %>% 
+            layer_lstm(units            = 50, 
+                       return_sequences = FALSE, 
+                       stateful         = TRUE) %>% 
+            layer_dense(units = 1)
+        
+        model %>% 
+            compile(loss = 'mae', optimizer = 'adam')
+        
+        # 5.1.7 Fitting LSTM
+        for (i in 1:epochs) {
+            model %>% fit(x          = x_train_arr, 
+                          y          = y_train_arr, 
+                          batch_size = batch_size,
+                          epochs     = 1, 
+                          verbose    = 1, 
+                          shuffle    = FALSE)
+            
+            model %>% reset_states()
+            cat("Epoch: ", i)
+            
+        }
+        
+        # 5.1.8 Predict and Return Tidy Data (MODIFIED)
+        # Make Predictions
+        pred_out <- model %>% 
+            predict(x_test_arr, batch_size = batch_size) %>%
+            .[,1] 
+        
+        # Make future index using tk_make_future_timeseries()
+        idx <- data %>%
+            tk_index() %>%
+            tk_make_future_timeseries(n_future = lag_setting)
+        
+        # Retransform values
+        pred_tbl <- tibble(
+            index   = idx,
+            value   = (pred_out * scale_history + center_history)^2
+        )
+        
+        # Combine actual data with predictions
+        tbl_1 <- df %>%
+            add_column(key = "actual")
+
+        tbl_3 <- pred_tbl %>%
+            add_column(key = "predict")
+
+        # Create time_bind_rows() to solve dplyr issue
+        time_bind_rows <- function(data_1, data_2, index) {
+            index_expr <- enquo(index)
+            bind_rows(data_1, data_2) %>%
+                as_tbl_time(index = !! index_expr)
+        }
+
+        ret <- list(tbl_1, tbl_3) %>%
+            reduce(time_bind_rows, index = index) %>%
+            arrange(key, index) %>%
+            mutate(key = as_factor(key))
+
+        return(ret)
+        
+    }
+    
+    safe_lstm <- possibly(lstm_prediction, otherwise = NA)
+    
+    safe_lstm(data, epochs, ...)
+    
+}
+
+
+future_sun_spots_tbl <- predict_keras_lstm_future(sun_spots, epochs = 300)
+
+
+Grafico8 <- plot_prediction(future_sun_spots_tbl %>% filter_time("1900"~"end"),
+                            id=NULL,
+                            alpha= 0.4,
+                            size=1.5)
+Grafico8
+```
+
+
+
